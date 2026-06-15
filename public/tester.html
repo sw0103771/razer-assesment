@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Payment Webhook API Tester</title>
+    <style>
+        :root { font-family: Arial, sans-serif; color: #1f2937; background: #f3f4f6; }
+        body { margin: 0; }
+        header { background: #111827; color: white; padding: 24px; }
+        main { max-width: 1180px; margin: 0 auto; padding: 24px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; }
+        .card { background: white; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, .08); }
+        h1 { margin: 0; font-size: 28px; }
+        h2 { margin-top: 0; font-size: 18px; }
+        label { display: block; font-size: 13px; font-weight: 700; margin-top: 12px; }
+        input, select, textarea { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 14px; }
+        textarea { min-height: 160px; font-family: Consolas, monospace; }
+        button { border: 0; border-radius: 10px; padding: 10px 14px; margin-top: 12px; cursor: pointer; font-weight: 700; }
+        .primary { background: #2563eb; color: white; }
+        .danger { background: #dc2626; color: white; }
+        .secondary { background: #e5e7eb; color: #111827; }
+        .success { background: #16a34a; color: white; }
+        .warning { background: #f59e0b; color: white; }
+        pre { background: #0b1020; color: #d1e7ff; padding: 14px; border-radius: 12px; overflow: auto; min-height: 110px; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { text-align: left; border-bottom: 1px solid #e5e7eb; padding: 10px 6px; vertical-align: top; }
+        .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; background: #e5e7eb; }
+        .PAID { background: #dcfce7; color: #166534; }
+        .PENDING { background: #fef9c3; color: #854d0e; }
+        .FAILED { background: #fee2e2; color: #991b1b; }
+        .REFUNDED { background: #dbeafe; color: #1e40af; }
+        .small { font-size: 13px; color: #6b7280; }
+        .row { display:flex; gap:8px; flex-wrap:wrap; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Payment Webhook API Tester</h1>
+    <p>This UI creates test orders and sends signed webhook requests to <b>/api/webhooks/payment-status</b>.</p>
+</header>
+<main>
+    <div class="grid">
+        <section class="card">
+            <h2>1. Create Test Order</h2>
+            <p class="small">Amount is stored in cents. Example: RM100.00 = 10000.</p>
+            <label>Amount</label>
+            <input id="orderAmount" type="number" value="10000">
+            <label>Currency</label>
+            <input id="orderCurrency" value="MYR" maxlength="3">
+            <label>Merchant ID Optional</label>
+            <input id="merchantId" placeholder="leave empty to auto-generate UUID">
+            <button class="primary" onclick="createOrder()">Create Order</button>
+        </section>
+
+        <section class="card">
+            <h2>2. Send Webhook</h2>
+            <label>Select Order</label>
+            <select id="orderSelect" onchange="preparePayload()"></select>
+            <label>Event Type</label>
+            <select id="eventType" onchange="preparePayload()">
+                <option value="payment.success">payment.success</option>
+                <option value="payment.failed">payment.failed</option>
+                <option value="refund.processed">refund.processed</option>
+            </select>
+            <label>Payment ID</label>
+            <input id="paymentId" value="pay_001">
+            <label>Webhook Amount</label>
+            <input id="webhookAmount" type="number" value="10000">
+            <div class="row">
+                <button class="secondary" onclick="preparePayload()">Refresh Payload</button>
+                <button class="success" onclick="sendWebhook()">Send Signed Webhook</button>
+                <button class="warning" onclick="sendDuplicate()">Send Duplicate</button>
+            </div>
+        </section>
+    </div>
+
+    <section class="card" style="margin-top:16px;">
+        <h2>Generated Request Payload</h2>
+        <textarea id="payloadBox"></textarea>
+        <p class="small">The UI signs this JSON using HMAC-SHA256 with local test secret: <b>test-secret</b>.</p>
+    </section>
+
+    <div class="grid" style="margin-top:16px;">
+        <section class="card">
+            <h2>API Response</h2>
+            <pre id="responseBox">No request yet.</pre>
+        </section>
+        <section class="card">
+            <h2>Logs</h2>
+            <button class="secondary" onclick="loadLogs()">Refresh Logs</button>
+            <pre id="logsBox">No logs loaded yet.</pre>
+        </section>
+    </div>
+
+    <section class="card" style="margin-top:16px;">
+        <div class="row" style="justify-content:space-between; align-items:center;">
+            <h2>Orders</h2>
+            <div>
+                <button class="secondary" onclick="loadOrders()">Refresh Orders</button>
+                <button class="danger" onclick="resetAll()">Reset Test Data</button>
+            </div>
+        </div>
+        <div id="ordersTable"></div>
+    </section>
+</main>
+
+<script>
+const WEBHOOK_SECRET = 'test-secret';
+let orders = [];
+let lastPayloadText = '';
+
+function pretty(obj) {
+    return JSON.stringify(obj, null, 2);
+}
+
+async function hmacSha256(message, secret) {
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+    );
+    const signature = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+    return Array.from(new Uint8Array(signature))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+async function api(url, options = {}) {
+    const res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+    });
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    return { status: res.status, body };
+}
+
+async function createOrder() {
+    const result = await api('/api/testing/orders', {
+        method: 'POST',
+        body: JSON.stringify({
+            amount: Number(document.getElementById('orderAmount').value),
+            currency: document.getElementById('orderCurrency').value,
+            merchant_id: document.getElementById('merchantId').value || null,
+        }),
+    });
+    document.getElementById('responseBox').textContent = pretty(result);
+    await loadOrders();
+}
+
+async function loadOrders() {
+    const result = await api('/api/testing/orders');
+    orders = result.body.orders || [];
+
+    const select = document.getElementById('orderSelect');
+    const current = select.value;
+    select.innerHTML = orders.map(o => `<option value="${o.id}">${o.id} | ${o.status} | ${o.amount} ${o.currency}</option>`).join('');
+    if (current && orders.some(o => o.id === current)) select.value = current;
+
+    document.getElementById('ordersTable').innerHTML = `
+        <table>
+            <thead><tr><th>Status</th><th>Order ID</th><th>Merchant</th><th>Amount</th><th>Gateway Payment</th></tr></thead>
+            <tbody>${orders.map(o => `
+                <tr>
+                    <td><span class="pill ${o.status}">${o.status}</span></td>
+                    <td>${o.id}</td>
+                    <td>${o.merchant_id}</td>
+                    <td>${o.amount} ${o.currency}</td>
+                    <td>${o.gateway_payment_id || '-'}</td>
+                </tr>
+            `).join('')}</tbody>
+        </table>
+    `;
+    preparePayload();
+}
+
+function selectedOrder() {
+    const id = document.getElementById('orderSelect').value;
+    return orders.find(o => o.id === id);
+}
+
+function preparePayload() {
+    const order = selectedOrder();
+    if (!order) {
+        document.getElementById('payloadBox').value = 'Create an order first.';
+        return;
+    }
+
+    const payload = {
+        event_type: document.getElementById('eventType').value,
+        payment_id: document.getElementById('paymentId').value || `pay_${Date.now()}`,
+        amount: Number(document.getElementById('webhookAmount').value || order.amount),
+        currency: order.currency,
+        metadata: {
+            order_id: order.id,
+            merchant_id: order.merchant_id,
+        },
+        timestamp: Math.floor(Date.now() / 1000),
+    };
+
+    lastPayloadText = JSON.stringify(payload);
+    document.getElementById('payloadBox').value = pretty(payload);
+}
+
+async function sendWebhook() {
+    preparePayload();
+    const payloadObj = JSON.parse(document.getElementById('payloadBox').value);
+    const compactPayload = JSON.stringify(payloadObj);
+    const signature = await hmacSha256(compactPayload, WEBHOOK_SECRET);
+
+    const result = await api('/api/webhooks/payment-status', {
+        method: 'POST',
+        headers: { 'X-Gateway-Signature': signature },
+        body: compactPayload,
+    });
+
+    document.getElementById('responseBox').textContent = pretty({
+        request: payloadObj,
+        signature,
+        response: result,
+    });
+
+    await loadOrders();
+    await loadLogs();
+}
+
+async function sendDuplicate() {
+    await sendWebhook();
+    await sendWebhook();
+}
+
+async function loadLogs() {
+    const result = await api('/api/testing/logs');
+    document.getElementById('logsBox').textContent = pretty(result.body);
+}
+
+async function resetAll() {
+    if (!confirm('Reset all orders and test logs?')) return;
+    const result = await api('/api/testing/reset', { method: 'POST' });
+    document.getElementById('responseBox').textContent = pretty(result);
+    await loadOrders();
+    await loadLogs();
+}
+
+loadOrders();
+loadLogs();
+</script>
+</body>
+</html>
