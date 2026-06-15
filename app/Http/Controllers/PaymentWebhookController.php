@@ -18,13 +18,7 @@ class PaymentWebhookController extends Controller
             return response()->json(['message' => 'Invalid JSON payload'], 400);
         }
 
-        /*
-         | Requirement 1: Webhook verification
-         | We verify HMAC-SHA256 using the raw body and shared secret from .env.
-         | Replay attack protection uses the timestamp field. The request is rejected
-         | if timestamp is older/newer than 5 minutes from server time.
-         | Unsigned requests are accepted only if they originate from 10.0.0.0/8.
-         */
+      
         $clientIp = $request->ip();
         $signature = $request->header('X-Gateway-Signature') ?? ($payload['signature'] ?? null);
 
@@ -54,20 +48,12 @@ class PaymentWebhookController extends Controller
             return response()->json(['message' => 'Missing required webhook fields'], 400);
         }
 
-        /*
-         | Requirement 2: Idempotency
-         | We use payment_id as the deduplication key and store processed IDs in
-         | storage/app/processed_payments.log, as requested by the assessment.
-         */
+      
         if ($this->hasPaymentAlreadyBeenProcessed($paymentId)) {
             return response()->json(['message' => 'Duplicate webhook ignored'], 200);
         }
 
-        /*
-         | Requirement 4: Concurrency safety
-         | Locking strategy: pessimistic lock per order using Laravel Cache::lock().
-         | If lock cannot be acquired, return 200 OK immediately to avoid gateway flood.
-         */
+       
         $lock = Cache::lock("payment_webhook_order_{$orderId}", 10);
 
         if (!$lock->get()) {
@@ -112,11 +98,7 @@ class PaymentWebhookController extends Controller
 
     private function handlePaymentSuccess(Order $order, array $payload, string $paymentId)
     {
-        /*
-         | Requirement 5: Amount reconciliation
-         | If amount differs, keep status unchanged and flag manual review.
-         | Manual review means logging to Laravel log and manual_review_orders.log.
-         */
+     
         if ((int) $payload['amount'] !== (int) $order->amount) {
             $this->flagForManualReview($order, $payload, 'Amount mismatch');
             return response()->json(['message' => 'Amount mismatch. Sent for manual review.'], 202);
@@ -158,11 +140,7 @@ class PaymentWebhookController extends Controller
 
     private function handleRefundProcessed(Order $order, array $payload, string $paymentId)
     {
-        /*
-         | Requirement 6: Refund handling
-         | Both full and partial refunds become REFUNDED because the gateway confirms
-         | the refund was processed. Invalid refund amount goes to manual review.
-         */
+       
         if (!$this->canTransition($order->status, 'REFUNDED')) {
             $this->logInvalidTransition($order, 'REFUNDED', $payload);
             return response()->json(['message' => 'Invalid status transition'], 409);
@@ -241,13 +219,7 @@ class PaymentWebhookController extends Controller
             return false;
         }
 
-        /*
-         | Normal production design: signature should be in X-Gateway-Signature,
-         | and raw body is signed directly.
-         |
-         | Assessment payload includes signature inside JSON. If signature is inside
-         | payload, remove it before calculating HMAC to avoid circular signing.
-         */
+       
         if (isset($payload['signature'])) {
             unset($payload['signature']);
             $bodyToSign = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -328,11 +300,6 @@ class PaymentWebhookController extends Controller
             fclose($handle);
         }
 
-        /*
-         | File rotation strategy:
-         | Run `php artisan processed-payments:rotate` daily/weekly via scheduler,
-         | or rotate when the file reaches a max size. In production, replace this
-         | file with a processed_webhooks DB table with payment_id UNIQUE.
-         */
+        
     }
 }
